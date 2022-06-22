@@ -1,0 +1,2 @@
+# aggregated
+aggregates store server
