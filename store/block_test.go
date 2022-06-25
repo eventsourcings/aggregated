@@ -89,7 +89,7 @@ func TestBlocks_Write_Multi(t *testing.T) {
 	wg.Wait()
 	bs.Close()
 	latency := time.Now().Sub(now)
-	fmt.Println(latency.String(), latency/100000/time.Microsecond)
+	fmt.Println(latency.String(), latency/100000)
 }
 
 func TestBlocks_Read(t *testing.T) {

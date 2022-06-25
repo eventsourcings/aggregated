@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
@@ -151,6 +152,7 @@ func OpenBlocks(options BlocksOpenOptions) (bs *Blocks, err error) {
 		sequence:         sequence,
 		blockSize:        blockSize,
 		blockContentSize: blockSize - 8,
+		counter:          sync.WaitGroup{},
 		cache:            cache,
 	}
 	fileSize := uint64(fs.Size())
@@ -168,6 +170,7 @@ type Blocks struct {
 	sequence         Sequence
 	blockSize        uint64
 	blockContentSize uint64
+	counter          sync.WaitGroup
 	cache            *ristretto.Cache
 }
 
@@ -205,20 +208,24 @@ func (bs *Blocks) Write(p []byte) (blockNo uint64, err error) {
 		err = fmt.Errorf("blocks: write failed cause can not write blank content")
 		return
 	}
+	bs.counter.Add(1)
 	blockNum := uint64(math.Ceil(float64(contentLen) / float64(bs.blockContentSize)))
 	if blockNum == 1 {
 		idx, nextErr := bs.sequence.Next()
 		if nextErr != nil {
+			bs.counter.Done()
 			err = fmt.Errorf("blocks: write failed cause can not get next block no, %v", nextErr)
 			return
 		}
 		block := bs.encodeBlock(p, 0)
 		writeBlockErr := bs.writeBlock(block, idx)
 		if writeBlockErr != nil {
+			bs.counter.Done()
 			err = fmt.Errorf("blocks: write failed, %v", writeBlockErr)
 			return
 		}
 		blockNo = idx
+		bs.counter.Done()
 		return
 	}
 	idxs := make([]uint64, blockNum)
@@ -232,6 +239,7 @@ func (bs *Blocks) Write(p []byte) (blockNo uint64, err error) {
 		blockContent := p[begIdx:endIdx]
 		idx, nextErr := bs.sequence.Next()
 		if nextErr != nil {
+			bs.counter.Done()
 			err = fmt.Errorf("blocks: write failed cause can not get next block no, %v", nextErr)
 			return
 		}
@@ -246,22 +254,27 @@ func (bs *Blocks) Write(p []byte) (blockNo uint64, err error) {
 	for i, block := range blocks {
 		writeBlockErr := bs.writeBlock(block, idxs[i])
 		if writeBlockErr != nil {
+			bs.counter.Done()
 			err = fmt.Errorf("blocks: write failed, %v", writeBlockErr)
 			return
 		}
 	}
 	blockNo = idxs[0]
+	bs.counter.Done()
 	return
 }
 
 func (bs *Blocks) writeBlock(block []byte, blockNo uint64) (err error) {
+	bs.counter.Add(1)
 	fileOffset := int64(blockNo*bs.blockSize) + blocksMetaSize
 	_, writeErr := bs.file.WriteAt(block, fileOffset)
 	if writeErr != nil {
+		bs.counter.Done()
 		err = fmt.Errorf("blocks: write %d block failed, %v", blockNo, writeErr)
 		return
 	}
 	bs.cache.Set(blockNo, block, int64(bs.blockSize))
+	bs.counter.Done()
 	return
 }
 
@@ -325,6 +338,7 @@ func (bs *Blocks) UpdateCacheSize(size uint64) {
 }
 
 func (bs *Blocks) Close() {
+	bs.counter.Wait()
 	_ = bs.file.Sync()
 	_ = bs.file.Close()
 	return
