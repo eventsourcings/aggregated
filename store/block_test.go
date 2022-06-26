@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"context"
 	"fmt"
 	"github.com/eventsourcings/aggregated/commons"
 	"github.com/eventsourcings/aggregated/store"
@@ -175,4 +176,49 @@ func TestEntryList_Contains(t *testing.T) {
 		})
 	}
 	fmt.Println(list.Contains(0), list.Contains(2), list.Contains(4), list.Contains(5))
+}
+
+func TestBlocks_Tail(t *testing.T) {
+	s := `G:\tmp\blocks\t1.bs`
+	bs, bsErr := store.OpenBlocks(store.BlocksOpenOptions{
+		Path:          s,
+		BlockSize:     64 * commons.BYTE,
+		MaxCachedSize: 0,
+		Sequence: &FakeSequence{
+			i: -1,
+		},
+		Meta: map[string]string{},
+	})
+	if bsErr != nil {
+		t.Error(bsErr)
+	}
+	defer bs.Close()
+	wg := new(sync.WaitGroup)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(bs *store.Blocks, wg *sync.WaitGroup, i int) {
+			ch, _, tailErr := bs.Tail(context.TODO(), 0, 1*time.Second)
+			wg.Done()
+			if tailErr != nil {
+				fmt.Println("tail[", i, "]:", tailErr)
+				return
+			}
+			for {
+				list, ok := <-ch
+				if !ok {
+					fmt.Println("tail[", i, "]:", "stop")
+					break
+				}
+				fmt.Println("tail[", i, "]:", list)
+			}
+		}(bs, wg, i)
+	}
+	wg.Wait()
+	for i := 0; i < 10; i++ {
+		bno, wErr := bs.Write([]byte(fmt.Sprintf("%d:%s", i, time.Now().String())))
+		fmt.Println(bno, wErr)
+	}
+	time.Sleep(5 * time.Second)
+	bs.Close()
+	time.Sleep(5 * time.Second)
 }
