@@ -50,13 +50,13 @@ func (x *Events) FlatMap() (flats map[string]*Events) {
 	flats = make(map[string]*Events)
 	for _, event := range x.Events {
 		flat, has := flats[event.AggregateId]
-		if has {
-			flat.Events = append(flat.Events, event)
-		} else {
-			flat.Events = make([]*Event, 0, len(x.Events))
-			flat.Events = append(flat.Events, event)
+		if !has {
+			flat = &Events{
+				Events: make([]*Event, 0, len(x.Events)),
+			}
 			flats[event.AggregateId] = flat
 		}
+		flat.Events = append(flat.Events, event)
 	}
 	for _, flat := range flats {
 		sort.Sort(flat)

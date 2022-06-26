@@ -79,3 +79,19 @@ func BenchmarkEvents_Encode(b *testing.B) {
 		_, _ = events.Encode()
 	}
 }
+
+func TestEvents_FlatMap(t *testing.T) {
+	events := &core.Events{}
+	for i := 0; i < 5; i++ {
+		events.Events = append(events.Events, core.NewEvent(
+			fmt.Sprintf("%d", i+1),
+			uint64(i+1),
+			fmt.Sprintf("%d", 11),
+			fmt.Sprintf("%d", 111),
+			[]byte(fmt.Sprintf("%d", 222)),
+		))
+	}
+	flats := events.FlatMap()
+	fmt.Println(fmt.Sprintf("%+v", flats))
+	fmt.Println(flats["111"].Events)
+}
