@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"github.com/dgraph-io/ristretto"
@@ -11,9 +12,11 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const (
@@ -99,11 +102,6 @@ func OpenBlocks(options BlocksOpenOptions) (bs *Blocks, err error) {
 			err = fmt.Errorf("new blocks failed, block size cant be less than 64B, current is %v", blockSize)
 			return
 		}
-		_, nextErr := sequence.Next()
-		if nextErr != nil {
-			err = fmt.Errorf("new blocks failed, get origin sequence failed, %v", nextErr)
-			return
-		}
 		meta["blockSize"] = fmt.Sprintf("%d", blockSize)
 		metaContent, encodeErr := msgpack.Marshal(meta)
 		if encodeErr != nil {
@@ -151,16 +149,23 @@ func OpenBlocks(options BlocksOpenOptions) (bs *Blocks, err error) {
 		file:             file,
 		sequence:         sequence,
 		blockSize:        blockSize,
-		blockContentSize: blockSize - 8,
+		blockContentSize: blockSize - 16,
 		counter:          sync.WaitGroup{},
 		cache:            cache,
 	}
 	fileSize := uint64(fs.Size())
 	if fileSize > uint64(blocksMetaSize) {
+		startBlockNo := uint64(0)
 		endBlockNo := (fileSize-uint64(blocksMetaSize))/blockSize - 1
-		bs.prepareCache(endBlockNo, uint64(maxCachedBlockNum))
+		if endBlockNo+1 >= uint64(maxCachedBlockNum) {
+			startBlockNo = endBlockNo + 1 - uint64(maxCachedBlockNum)
+		}
+		err = bs.prepareCache(startBlockNo, endBlockNo)
+		if err != nil {
+			err = fmt.Errorf("new blocks failed, %v", err)
+			return
+		}
 	}
-
 	return
 }
 
@@ -172,30 +177,31 @@ type Blocks struct {
 	blockContentSize uint64
 	counter          sync.WaitGroup
 	cache            *ristretto.Cache
+	lastBlockNo      uint64
 }
 
-func (bs *Blocks) prepareCache(endBlockNo uint64, maxCachedBlockNum uint64) {
-	if maxCachedBlockNum > 10000 {
-		maxCachedBlockNum = 10000
+func (bs *Blocks) prepareCache(startBlockNo uint64, endBlockNo uint64) (err error) {
+	end, hasEnd, readEndErr := bs.read(endBlockNo)
+	if readEndErr != nil {
+		err = fmt.Errorf("prepare caches failed, %v", readEndErr)
+		return
 	}
-	for i := uint64(0); i < maxCachedBlockNum; i++ {
-		fileOffset := int64(endBlockNo*bs.blockSize) + blocksMetaSize
-		block := make([]byte, bs.blockSize)
-		n, readErr := bs.file.ReadAt(block, fileOffset)
-		if readErr != nil {
-			if readErr == io.EOF {
-				return
-			}
-			return
-		}
-		if n > 0 {
-			bs.cache.Set(endBlockNo, block, int64(bs.blockSize))
-		}
-		endBlockNo--
-		if endBlockNo < 1 {
-			return
-		}
+	if !hasEnd {
+		return
 	}
+	bs.lastBlockNo = end.BlockNos[0]
+	if startBlockNo > bs.lastBlockNo {
+		startBlockNo = bs.lastBlockNo
+	}
+	entries, listErr := bs.List(startBlockNo, bs.lastBlockNo)
+	if listErr != nil {
+		err = fmt.Errorf("prepare caches failed, %v", listErr)
+		return
+	}
+	for _, entry := range entries {
+		bs.cache.Set(entry.BlockNos[0], entry, int64(len(entry.Value)))
+	}
+	return
 }
 
 func (bs *Blocks) Write(p []byte) (blockNo uint64, err error) {
@@ -217,7 +223,7 @@ func (bs *Blocks) Write(p []byte) (blockNo uint64, err error) {
 			err = fmt.Errorf("blocks: write failed cause can not get next block no, %v", nextErr)
 			return
 		}
-		block := bs.encodeBlock(p, 0)
+		block := bs.encodeBlock(p, 0, 0)
 		writeBlockErr := bs.writeBlock(block, idx)
 		if writeBlockErr != nil {
 			bs.counter.Done()
@@ -225,7 +231,11 @@ func (bs *Blocks) Write(p []byte) (blockNo uint64, err error) {
 			return
 		}
 		blockNo = idx
+		bs.cache.Set(blockNo, p, int64(len(p)))
 		bs.counter.Done()
+		if atomic.LoadUint64(&bs.lastBlockNo) < blockNo {
+			atomic.StoreUint64(&bs.lastBlockNo, blockNo)
+		}
 		return
 	}
 	idxs := make([]uint64, blockNum)
@@ -244,14 +254,18 @@ func (bs *Blocks) Write(p []byte) (blockNo uint64, err error) {
 			return
 		}
 		idxs[i] = idx
-		if i > 1 {
-			bs.updateBlockStickyNo(blocks[i-1], idx)
-		}
-		blocks[i] = bs.encodeBlock(blockContent, 0)
+		blocks[i] = bs.encodeBlock(blockContent, 0, 0)
 	}
-	bs.updateBlockStickyNo(blocks[0], idxs[1])
-	bs.updateBlockStickyNo(blocks[blockNum-2], idxs[blockNum-1])
 	for i, block := range blocks {
+		prev := uint64(0)
+		next := uint64(0)
+		if i > 0 {
+			prev = idxs[i-1]
+		}
+		if uint64(i) < blockNum-1 {
+			next = idxs[i+1]
+		}
+		bs.updateBlockStickyNo(block, prev, next)
 		writeBlockErr := bs.writeBlock(block, idxs[i])
 		if writeBlockErr != nil {
 			bs.counter.Done()
@@ -260,6 +274,13 @@ func (bs *Blocks) Write(p []byte) (blockNo uint64, err error) {
 		}
 	}
 	blockNo = idxs[0]
+	bs.cache.Set(blockNo, &Entry{
+		BlockNos: idxs,
+		Value:    p,
+	}, int64(len(p)))
+	if atomic.LoadUint64(&bs.lastBlockNo) < blockNo {
+		atomic.StoreUint64(&bs.lastBlockNo, blockNo)
+	}
 	bs.counter.Done()
 	return
 }
@@ -273,12 +294,98 @@ func (bs *Blocks) writeBlock(block []byte, blockNo uint64) (err error) {
 		err = fmt.Errorf("blocks: write %d block failed, %v", blockNo, writeErr)
 		return
 	}
-	bs.cache.Set(blockNo, block, int64(bs.blockSize))
 	bs.counter.Done()
 	return
 }
 
-func (bs *Blocks) Read(blockNo uint64) (p []byte, has bool, err error) {
+func (bs *Blocks) List(startBlockNo uint64, endBlockNo uint64) (entries EntryList, err error) {
+	if startBlockNo > atomic.LoadUint64(&bs.lastBlockNo) {
+		return
+	}
+	entries = make([]*Entry, 0, endBlockNo-startBlockNo+1)
+	currentBlockNo := startBlockNo
+	for {
+		if currentBlockNo > endBlockNo {
+			break
+		}
+		entry, has, readErr := bs.Read(currentBlockNo)
+		if readErr != nil {
+			err = fmt.Errorf("blocks: list from %d to %d failed, %v", startBlockNo, endBlockNo, readErr)
+			return
+		}
+		if !has {
+			break
+		}
+		entries.Append(entry)
+		vacant := entry.BlockNos.Vacant()
+		if vacant == nil || len(vacant) == 0 {
+			currentBlockNo = entry.BlockNos[len(entry.BlockNos)-1] + 1
+			continue
+		}
+		vacantSegments := vacant.SuccessiveSegments()
+		for _, segment := range vacantSegments {
+			segmentStart := segment[0]
+			segmentEnd := segment[len(segment)-1]
+			vacantEntries, vacantErr := bs.List(segmentStart, segmentEnd)
+			if vacantErr != nil {
+				err = fmt.Errorf("blocks: list from %d to %d failed, %v", segmentStart, segmentEnd, vacantErr)
+				return
+			}
+			if vacantEntries != nil && len(vacantEntries) > 0 {
+				for _, vacantEntry := range vacantEntries {
+					entries.Append(vacantEntry)
+				}
+			}
+		}
+		currentBlockNo = entry.BlockNos[len(entry.BlockNos)-1] + 1
+	}
+	return
+}
+
+func (bs *Blocks) Read(blockNo uint64) (entry *Entry, has bool, err error) {
+	cached, hasCached := bs.cache.Get(blockNo)
+	if hasCached {
+		entry = cached.(*Entry)
+		has = true
+		return
+	}
+	entry, has, err = bs.read(blockNo)
+	return
+}
+
+func (bs *Blocks) read(blockNo uint64) (entry *Entry, has bool, err error) {
+	group := make(map[uint64][]byte)
+	has, err = bs.load(blockNo, group)
+	if err != nil {
+		return
+	}
+	if !has {
+		return
+	}
+	if len(group) == 1 {
+		entry = &Entry{
+			BlockNos: []uint64{blockNo},
+			Value:    group[blockNo],
+		}
+		return
+	}
+	blockNos := BlockNoList(make([]uint64, 0, len(group)))
+	for no := range group {
+		blockNos = append(blockNos, no)
+	}
+	sort.Sort(blockNos)
+	buf := bytes.NewBuffer([]byte{})
+	for _, no := range blockNos {
+		buf.Write(group[no])
+	}
+	entry = &Entry{
+		BlockNos: blockNos,
+		Value:    buf.Bytes(),
+	}
+	return
+}
+
+func (bs *Blocks) load(blockNo uint64, group map[uint64][]byte) (has bool, err error) {
 	block, hasBlock, readErr := bs.readBlock(blockNo)
 	if readErr != nil {
 		err = readErr
@@ -287,31 +394,41 @@ func (bs *Blocks) Read(blockNo uint64) (p []byte, has bool, err error) {
 	if !hasBlock {
 		return
 	}
-	content, stickyNo := bs.decodeBlock(block)
-	p = append(p, content...)
-	if stickyNo > 0 {
-		sub, hasSub, readSubErr := bs.Read(stickyNo)
-		if readSubErr != nil {
-			err = fmt.Errorf("blocks: read %d block sticks failed, %v", blockNo, readSubErr)
-			return
+	content, prev, next := bs.decodeBlock(block)
+	group[blockNo] = content
+	if prev > 0 {
+		_, hasPrev := group[prev]
+		if !hasPrev {
+			hasPrevContent, prevErr := bs.load(prev, group)
+			if prevErr != nil {
+				err = fmt.Errorf("blocks: read prev of %d block failed, %v", blockNo, prevErr)
+				return
+			}
+			if !hasPrevContent {
+				err = fmt.Errorf("blocks: read prev of %d block failed, prev was not found", blockNo)
+				return
+			}
 		}
-		if !hasSub {
-			err = fmt.Errorf("blocks: read %d block sticks failed, next stick is empty", blockNo)
-			return
+	}
+	if next > 0 {
+		_, hasNext := group[next]
+		if !hasNext {
+			hasNextContent, nextErr := bs.load(next, group)
+			if nextErr != nil {
+				err = fmt.Errorf("blocks: read next of %d block failed, %v", blockNo, nextErr)
+				return
+			}
+			if !hasNextContent {
+				err = fmt.Errorf("blocks: read next of %d block failed, next was not found", blockNo)
+				return
+			}
 		}
-		p = append(p, sub...)
 	}
 	has = true
 	return
 }
 
 func (bs *Blocks) readBlock(blockNo uint64) (block []byte, has bool, err error) {
-	cached, hasCached := bs.cache.Get(blockNo)
-	if hasCached {
-		block = cached.([]byte)
-		has = true
-		return
-	}
 	fileOffset := int64(blockNo*bs.blockSize) + blocksMetaSize
 	stored := make([]byte, bs.blockSize)
 	n, readErr := bs.file.ReadAt(stored, fileOffset)
@@ -344,25 +461,106 @@ func (bs *Blocks) Close() {
 	return
 }
 
-func (bs *Blocks) encodeBlock(p []byte, stickyNo uint64) (b []byte) {
+func (bs *Blocks) encodeBlock(p []byte, prev uint64, next uint64) (b []byte) {
 	b = make([]byte, bs.blockSize)
-	binary.LittleEndian.PutUint64(b[0:8], stickyNo)
-	copy(b[8:], p)
+	binary.LittleEndian.PutUint64(b[0:8], prev)
+	binary.LittleEndian.PutUint64(b[8:16], next)
+	copy(b[16:], p)
 	return
 }
 
-func (bs *Blocks) decodeBlock(b []byte) (p []byte, stickyNo uint64) {
-	stickyNo = binary.LittleEndian.Uint64(b[0:8])
-	p = b[8:]
+func (bs *Blocks) decodeBlock(b []byte) (p []byte, prev uint64, next uint64) {
+	prev = binary.LittleEndian.Uint64(b[0:8])
+	next = binary.LittleEndian.Uint64(b[8:16])
+	p = b[16:]
 	return
 }
 
-func (bs *Blocks) getBlockStickyNo(block []byte) (stickyNo uint64) {
-	stickyNo = binary.LittleEndian.Uint64(block[0:8])
+func (bs *Blocks) getBlockStickyNo(block []byte) (prev uint64, next uint64) {
+	prev = binary.LittleEndian.Uint64(block[0:8])
+	next = binary.LittleEndian.Uint64(block[8:16])
 	return
 }
 
-func (bs *Blocks) updateBlockStickyNo(block []byte, stickyNo uint64) {
-	binary.LittleEndian.PutUint64(block[0:8], stickyNo)
+func (bs *Blocks) updateBlockStickyNo(block []byte, prev uint64, next uint64) {
+	binary.LittleEndian.PutUint64(block[0:8], prev)
+	binary.LittleEndian.PutUint64(block[8:16], next)
+	return
+}
+
+type BlockNoList []uint64
+
+func (p BlockNoList) Len() int           { return len(p) }
+func (p BlockNoList) Less(i, j int) bool { return p[i] < p[j] }
+func (p BlockNoList) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+
+func (p BlockNoList) SuccessiveSegments() (segments []BlockNoList) {
+	if p == nil || len(p) == 0 {
+		return
+	}
+	if len(p) == 1 {
+		segments = append(segments, p)
+		return
+	}
+	current := BlockNoList(make([]uint64, 0, 1))
+	target := p[0]
+	current = append(current, target)
+	for i := 1; i < len(p); i++ {
+		if p[i]-target == 1 {
+			current = append(current, p[i])
+			target = p[i]
+			continue
+		}
+		segments = append(segments, current)
+		current = make([]uint64, 0, 1)
+		target = p[i]
+		current = append(current, target)
+	}
+	segments = append(segments, current)
+	return
+}
+
+func (p BlockNoList) Vacant() (values BlockNoList) {
+	if p == nil || len(p) <= 1 {
+		return
+	}
+	target := p[0]
+	for i := 1; i < len(p); i++ {
+		if p[i]-target == 1 {
+			target = p[i]
+			continue
+		}
+		value := target
+		for {
+			value = value + 1
+			if value == p[i] {
+				break
+			}
+			values = append(values, value)
+		}
+		target = p[i]
+	}
+	return
+}
+
+type Entry struct {
+	BlockNos BlockNoList
+	Value    []byte
+}
+
+type EntryList []*Entry
+
+func (p EntryList) Len() int           { return len(p) }
+func (p EntryList) Less(i, j int) bool { return p[i].BlockNos[0] < p[j].BlockNos[0] }
+func (p EntryList) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+
+func (p *EntryList) Append(e *Entry) {
+	pos := sort.Search(len(*p), func(i int) bool {
+		pp := *p
+		return pp[i].BlockNos[0] >= e.BlockNos[0]
+	})
+	if pos >= len(*p) {
+		*p = append(*p, e)
+	}
 	return
 }
