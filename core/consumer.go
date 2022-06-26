@@ -68,7 +68,7 @@ func (client *ConsumerClient) Key() (key string) {
 	return
 }
 
-/*Send
+/*write
 Message
 +---------------------------------------------------------+-----------+
 | Head                                                    | Body      |
@@ -78,9 +78,9 @@ Message
 | Id                  | Method          | Len(Body)       | Body      |
 +---------------------+-----------------+-----------------+-----------+
 */
-func (client *ConsumerClient) Send(p []byte) (result *ConsumeResult, err error) {
-	if p == nil || len(p) == 0 {
-		return
+func (client *ConsumerClient) write(method uint64, p []byte) (result *ConsumeResult, err error) {
+	if p == nil {
+		p = []byte{}
 	}
 	client.lock.Lock()
 	defer client.lock.Unlock()
@@ -91,7 +91,7 @@ func (client *ConsumerClient) Send(p []byte) (result *ConsumeResult, err error) 
 	requestId := atomic.AddUint64(&client.latestRequestId, 1)
 	head := make([]byte, 24)
 	binary.LittleEndian.PutUint64(head[0:8], requestId)
-	binary.LittleEndian.PutUint64(head[8:16], PushEvents)
+	binary.LittleEndian.PutUint64(head[8:16], method)
 	binary.LittleEndian.PutUint64(head[16:24], uint64(len(p)))
 	buf := bytebufferpool.Get()
 	_, writeHead := buf.Write(head)
@@ -100,16 +100,20 @@ func (client *ConsumerClient) Send(p []byte) (result *ConsumeResult, err error) 
 		err = fmt.Errorf("consumer[%s]: make head failed, %v", client.id, writeHead)
 		return
 	}
-	_, writeBody := buf.Write(p)
-	if writeBody != nil {
-		bytebufferpool.Put(buf)
-		err = fmt.Errorf("consumer[%s]: make body failed, %v", client.id, writeBody)
-		return
+	if len(p) > 0 {
+		_, writeBody := buf.Write(p)
+		if writeBody != nil {
+			bytebufferpool.Put(buf)
+			err = fmt.Errorf("consumer[%s]: make body failed, %v", client.id, writeBody)
+			return
+		}
 	}
 	content := buf.Bytes()
 	bytebufferpool.Put(buf)
 	result = &ConsumeResult{
-		ch: make(chan bool),
+		lock:   sync.Mutex{},
+		closed: false,
+		ch:     make(chan bool),
 	}
 	client.results.Store(requestId, result)
 	n, writeErr := client.conn.Write(content)
@@ -137,6 +141,13 @@ func (client *ConsumerClient) Ping() (ok bool) {
 
 func (client *ConsumerClient) Pong() {
 
+	return
+}
+
+func (client *ConsumerClient) Push(events Events) (ok bool) {
+	// todo
+	// todo write(push, encode(events))
+	// todo ok = <- result.Done()
 	return
 }
 

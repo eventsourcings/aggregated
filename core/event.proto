@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package core;
+option go_package = "../core";
+
+message Event {
+  uint64 id = 1;
+  string aggregate = 2;
+  string aggregateId = 3;
+  string name = 4;
+  bytes content = 5;
+}
+
+message Events {
+  repeated Event events = 1;
+}
