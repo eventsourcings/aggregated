@@ -144,7 +144,7 @@ func (client *ConsumerClient) Pong() {
 	return
 }
 
-func (client *ConsumerClient) Push(events Events) (ok bool) {
+func (client *ConsumerClient) Push(events *Events) (ok bool) {
 	// todo
 	// todo write(push, encode(events))
 	// todo ok = <- result.Done()

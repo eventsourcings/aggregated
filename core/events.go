@@ -2,7 +2,7 @@ package core
 
 import (
 	"fmt"
-	"github.com/golang/protobuf/proto"
+	"google.golang.org/protobuf/proto"
 	"sort"
 )
 
