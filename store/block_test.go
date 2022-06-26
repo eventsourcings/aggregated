@@ -117,6 +117,27 @@ func TestBlocks_Read(t *testing.T) {
 	fmt.Println(has, readErr)
 }
 
+func TestBlocks_List(t *testing.T) {
+	s := `G:\tmp\blocks\t1.bs`
+	bs, bsErr := store.OpenBlocks(store.BlocksOpenOptions{
+		Path:          s,
+		BlockSize:     64 * commons.BYTE,
+		MaxCachedSize: 0,
+		Sequence: &FakeSequence{
+			i: -1,
+		},
+		Meta: map[string]string{},
+	})
+	if bsErr != nil {
+		t.Error(bsErr)
+	}
+	list, listErr := bs.List(0, 0)
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	fmt.Println(list)
+}
+
 func TestBlockNoList_Vacant(t *testing.T) {
 	nos := store.BlockNoList{0, 1, 4, 6, 8}
 	fmt.Println(nos, nos.Vacant(), nos.Vacant().SuccessiveSegments())
@@ -143,4 +164,15 @@ func TestEntryList_Append(t *testing.T) {
 	})
 	fmt.Println(len(list))
 
+}
+
+func TestEntryList_Contains(t *testing.T) {
+	list := store.EntryList{}
+	for i := 0; i < 5; i++ {
+		list.Append(&store.Entry{
+			BlockNos: []uint64{uint64(i)},
+			Value:    nil,
+		})
+	}
+	fmt.Println(list.Contains(0), list.Contains(2), list.Contains(4), list.Contains(5))
 }

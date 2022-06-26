@@ -154,6 +154,7 @@ func OpenBlocks(options BlocksOpenOptions) (bs *Blocks, err error) {
 		blockContentSize: blockSize - 16,
 		counter:          sync.WaitGroup{},
 		cache:            cache,
+		writing:          sync.Map{},
 		closed:           0,
 	}
 	fileSize := uint64(fs.Size())
@@ -180,6 +181,7 @@ type Blocks struct {
 	blockContentSize uint64
 	counter          sync.WaitGroup
 	cache            *ristretto.Cache
+	writing          sync.Map
 	lastBlockNo      uint64
 	closed           int64
 }
@@ -232,14 +234,17 @@ func (bs *Blocks) Write(p []byte) (blockNo uint64, err error) {
 			return
 		}
 		block := bs.encodeBlock(p, 0, 0)
+		bs.writing.Store(idx, idx)
 		writeBlockErr := bs.writeBlock(block, idx)
 		if writeBlockErr != nil {
+			bs.writing.Delete(idx)
 			bs.counter.Done()
 			err = fmt.Errorf("blocks: write failed, %v", writeBlockErr)
 			return
 		}
 		blockNo = idx
 		bs.cache.Set(blockNo, p, int64(len(p)))
+		bs.writing.Delete(idx)
 		bs.counter.Done()
 		if atomic.LoadUint64(&bs.lastBlockNo) < blockNo {
 			atomic.StoreUint64(&bs.lastBlockNo, blockNo)
@@ -264,6 +269,7 @@ func (bs *Blocks) Write(p []byte) (blockNo uint64, err error) {
 		idxs[i] = idx
 		blocks[i] = bs.encodeBlock(blockContent, 0, 0)
 	}
+	bs.writing.Store(idxs[0], idxs[0])
 	for i, block := range blocks {
 		prev := uint64(0)
 		next := uint64(0)
@@ -276,6 +282,7 @@ func (bs *Blocks) Write(p []byte) (blockNo uint64, err error) {
 		bs.updateBlockStickyNo(block, prev, next)
 		writeBlockErr := bs.writeBlock(block, idxs[i])
 		if writeBlockErr != nil {
+			bs.writing.Delete(idxs[0])
 			bs.counter.Done()
 			err = fmt.Errorf("blocks: write failed, %v", writeBlockErr)
 			return
@@ -286,6 +293,7 @@ func (bs *Blocks) Write(p []byte) (blockNo uint64, err error) {
 		BlockNos: idxs,
 		Value:    p,
 	}, int64(len(p)))
+	bs.writing.Delete(idxs[0])
 	if atomic.LoadUint64(&bs.lastBlockNo) < blockNo {
 		atomic.StoreUint64(&bs.lastBlockNo, blockNo)
 	}
@@ -314,7 +322,7 @@ func (bs *Blocks) List(startBlockNo uint64, endBlockNo uint64) (entries EntryLis
 	if startBlockNo > atomic.LoadUint64(&bs.lastBlockNo) {
 		return
 	}
-	if endBlockNo == 0 {
+	if endBlockNo == 0 || endBlockNo > atomic.LoadUint64(&bs.lastBlockNo) {
 		endBlockNo = atomic.LoadUint64(&bs.lastBlockNo)
 	}
 	entries = make([]*Entry, 0, endBlockNo-startBlockNo+1)
@@ -323,18 +331,34 @@ func (bs *Blocks) List(startBlockNo uint64, endBlockNo uint64) (entries EntryLis
 		if currentBlockNo > endBlockNo {
 			break
 		}
-		entry, has, readErr := bs.Read(currentBlockNo)
-		if readErr != nil {
-			err = fmt.Errorf("blocks: list from %d to %d failed, %v", startBlockNo, endBlockNo, readErr)
+		if entries.Contains(currentBlockNo) {
+			continue
+		}
+		var currentEntry *Entry
+		for i := 0; i < 10; i++ {
+			entry, has, readErr := bs.Read(currentBlockNo)
+			if readErr != nil {
+				err = fmt.Errorf("blocks: list from %d to %d failed, %v", startBlockNo, endBlockNo, readErr)
+				return
+			}
+			if has {
+				currentEntry = entry
+				break
+			}
+			_, writing := bs.writing.Load(currentBlockNo)
+			if !writing {
+				continue
+			}
+			time.Sleep(500 * time.Microsecond)
+		}
+		if currentEntry == nil {
+			err = fmt.Errorf("blocks: list from %d to %d failed, read %d block timeout", startBlockNo, endBlockNo, currentBlockNo)
 			return
 		}
-		if !has {
-			break
-		}
-		entries.Append(entry)
-		vacant := entry.BlockNos.Vacant()
+		entries.Append(currentEntry)
+		vacant := currentEntry.BlockNos.Vacant()
 		if vacant == nil || len(vacant) == 0 {
-			currentBlockNo = entry.BlockNos[len(entry.BlockNos)-1] + 1
+			currentBlockNo = currentEntry.BlockNos[len(currentEntry.BlockNos)-1] + 1
 			continue
 		}
 		vacantSegments := vacant.SuccessiveSegments()
@@ -352,7 +376,7 @@ func (bs *Blocks) List(startBlockNo uint64, endBlockNo uint64) (entries EntryLis
 				}
 			}
 		}
-		currentBlockNo = entry.BlockNos[len(entry.BlockNos)-1] + 1
+		currentBlockNo = currentEntry.BlockNos[len(currentEntry.BlockNos)-1] + 1
 	}
 	return
 }
@@ -388,6 +412,8 @@ func (bs *Blocks) Tail(ctx context.Context, startBlockNo uint64, interval time.D
 					break
 				}
 				entriesCh <- list
+				endBlock := list[len(list)-1]
+				startBlockNo = endBlock.BlockNos[len(endBlock.BlockNos)-1] + 1
 			}
 			if stopped {
 				break
@@ -623,5 +649,24 @@ func (p *EntryList) Append(e *Entry) {
 	if pos >= len(*p) {
 		*p = append(*p, e)
 	}
+	return
+}
+
+func (p EntryList) String() string {
+	nos := make([]string, 0, 1)
+	for _, entry := range p {
+		nos = append(nos, fmt.Sprintf("{%d}", entry.BlockNos[0]))
+	}
+	return "[" + strings.Join(nos, ",") + "]"
+}
+
+func (p EntryList) Contains(blockNo uint64) (ok bool) {
+	pos := sort.Search(len(p), func(i int) bool {
+		entry := p[i]
+		return sort.Search(len(entry.BlockNos), func(j int) bool {
+			return entry.BlockNos[j] >= blockNo
+		}) < len(entry.BlockNos)
+	})
+	ok = pos < len(p)
 	return
 }
