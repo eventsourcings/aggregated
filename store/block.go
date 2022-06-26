@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"github.com/dgraph-io/ristretto"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const (
@@ -152,6 +154,7 @@ func OpenBlocks(options BlocksOpenOptions) (bs *Blocks, err error) {
 		blockContentSize: blockSize - 16,
 		counter:          sync.WaitGroup{},
 		cache:            cache,
+		closed:           0,
 	}
 	fileSize := uint64(fs.Size())
 	if fileSize > uint64(blocksMetaSize) {
@@ -178,6 +181,7 @@ type Blocks struct {
 	counter          sync.WaitGroup
 	cache            *ristretto.Cache
 	lastBlockNo      uint64
+	closed           int64
 }
 
 func (bs *Blocks) prepareCache(startBlockNo uint64, endBlockNo uint64) (err error) {
@@ -205,6 +209,10 @@ func (bs *Blocks) prepareCache(startBlockNo uint64, endBlockNo uint64) (err erro
 }
 
 func (bs *Blocks) Write(p []byte) (blockNo uint64, err error) {
+	if atomic.LoadInt64(&bs.closed) > 0 {
+		err = fmt.Errorf("blocks: write failed cause blocks was closed")
+		return
+	}
 	if p == nil {
 		err = fmt.Errorf("blocks: write failed cause can not write nil content")
 		return
@@ -299,8 +307,15 @@ func (bs *Blocks) writeBlock(block []byte, blockNo uint64) (err error) {
 }
 
 func (bs *Blocks) List(startBlockNo uint64, endBlockNo uint64) (entries EntryList, err error) {
+	if atomic.LoadInt64(&bs.closed) > 0 {
+		err = fmt.Errorf("blocks: list failed cause blocks was closed")
+		return
+	}
 	if startBlockNo > atomic.LoadUint64(&bs.lastBlockNo) {
 		return
+	}
+	if endBlockNo == 0 {
+		endBlockNo = atomic.LoadUint64(&bs.lastBlockNo)
 	}
 	entries = make([]*Entry, 0, endBlockNo-startBlockNo+1)
 	currentBlockNo := startBlockNo
@@ -342,7 +357,52 @@ func (bs *Blocks) List(startBlockNo uint64, endBlockNo uint64) (entries EntryLis
 	return
 }
 
+func (bs *Blocks) Tail(ctx context.Context, startBlockNo uint64, interval time.Duration) (entries <-chan EntryList, stop func(), err error) {
+	if atomic.LoadInt64(&bs.closed) > 0 {
+		err = fmt.Errorf("blocks: tail failed cause blocks was closed")
+		return
+	}
+	if interval < 1 {
+		interval = 50 * time.Millisecond
+	}
+	ctx, stop = context.WithCancel(ctx)
+	entriesCh := make(chan EntryList, 4096)
+	go func(ctx context.Context, bs *Blocks, startBlockNo uint64, interval time.Duration, entriesCh chan EntryList) {
+		for {
+			stopped := false
+			select {
+			case <-ctx.Done():
+				stopped = true
+				break
+			case <-time.After(interval):
+				if atomic.LoadInt64(&bs.closed) > 0 {
+					close(entriesCh)
+					stopped = true
+					break
+				}
+				list, listErr := bs.List(startBlockNo, 0)
+				if listErr != nil {
+					break
+				}
+				if list == nil || len(list) == 0 {
+					break
+				}
+				entriesCh <- list
+			}
+			if stopped {
+				break
+			}
+		}
+	}(ctx, bs, startBlockNo, interval, entriesCh)
+	entries = entriesCh
+	return
+}
+
 func (bs *Blocks) Read(blockNo uint64) (entry *Entry, has bool, err error) {
+	if atomic.LoadInt64(&bs.closed) > 0 {
+		err = fmt.Errorf("blocks: read failed cause blocks was closed")
+		return
+	}
 	cached, hasCached := bs.cache.Get(blockNo)
 	if hasCached {
 		entry = cached.(*Entry)
@@ -455,6 +515,7 @@ func (bs *Blocks) UpdateCacheSize(size uint64) {
 }
 
 func (bs *Blocks) Close() {
+	atomic.StoreInt64(&bs.closed, 1)
 	bs.counter.Wait()
 	_ = bs.file.Sync()
 	_ = bs.file.Close()
