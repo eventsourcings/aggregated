@@ -1,24 +1,13 @@
 package core
 
 import (
-	"bytes"
 	"context"
-	"encoding/binary"
 	"fmt"
 	"github.com/dgraph-io/badger/v3"
 	"github.com/eventsourcings/aggregated/commons"
-	"github.com/valyala/bytebufferpool"
-	"io"
 	"net"
 	"sync"
 	"sync/atomic"
-)
-
-const (
-	Ping          = uint64(1)
-	Pong          = uint64(2)
-	PushEvents    = uint64(3)
-	EventsHandled = uint64(4)
 )
 
 type ConsumeResult struct {
@@ -27,8 +16,12 @@ type ConsumeResult struct {
 	ch     chan bool
 }
 
-func (r *ConsumeResult) Done() (ch <-chan bool) {
-	ch = r.ch
+func (r *ConsumeResult) done() (succeed bool) {
+	result, ok := <-r.ch
+	if !ok {
+		return
+	}
+	succeed = result
 	return
 }
 
@@ -39,6 +32,7 @@ func (r *ConsumeResult) succeed() {
 		return
 	}
 	r.ch <- true
+	r.closed = true
 	close(r.ch)
 }
 
@@ -49,6 +43,7 @@ func (r *ConsumeResult) failed() {
 		return
 	}
 	r.ch <- false
+	r.closed = true
 	close(r.ch)
 }
 
@@ -68,16 +63,6 @@ func (client *ConsumerClient) Key() (key string) {
 	return
 }
 
-/*write
-Message
-+---------------------------------------------------------+-----------+
-| Head                                                    | Body      |
-+---------------------+-----------------+-----------------+-----------+
-| 8(LittleEndian)     | 8(LittleEndian) | 8(LittleEndian) | n         |
-+---------------------+-----------------+-----------------+-----------+
-| Id                  | Method          | Len(Body)       | Body      |
-+---------------------+-----------------+-----------------+-----------+
-*/
 func (client *ConsumerClient) write(method uint64, p []byte) (result *ConsumeResult, err error) {
 	if p == nil {
 		p = []byte{}
@@ -89,65 +74,37 @@ func (client *ConsumerClient) write(method uint64, p []byte) (result *ConsumeRes
 		return
 	}
 	requestId := atomic.AddUint64(&client.latestRequestId, 1)
-	head := make([]byte, 24)
-	binary.LittleEndian.PutUint64(head[0:8], requestId)
-	binary.LittleEndian.PutUint64(head[8:16], method)
-	binary.LittleEndian.PutUint64(head[16:24], uint64(len(p)))
-	buf := bytebufferpool.Get()
-	_, writeHead := buf.Write(head)
-	if writeHead != nil {
-		bytebufferpool.Put(buf)
-		err = fmt.Errorf("consumer[%s]: make head failed, %v", client.id, writeHead)
-		return
-	}
-	if len(p) > 0 {
-		_, writeBody := buf.Write(p)
-		if writeBody != nil {
-			bytebufferpool.Put(buf)
-			err = fmt.Errorf("consumer[%s]: make body failed, %v", client.id, writeBody)
-			return
-		}
-	}
-	content := buf.Bytes()
-	bytebufferpool.Put(buf)
 	result = &ConsumeResult{
 		lock:   sync.Mutex{},
 		closed: false,
 		ch:     make(chan bool),
 	}
-	client.results.Store(requestId, result)
-	n, writeErr := client.conn.Write(content)
+	writeErr := WriteMessage(requestId, method, p, client.conn)
 	if writeErr != nil {
 		client.results.Delete(requestId)
-		close(result.ch)
+		result.failed()
 		result = nil
 		err = fmt.Errorf("consumer[%s]: write to conn failed, %v", client.id, writeErr)
 		return
 	}
-	if n != len(content) {
-		client.results.Delete(requestId)
-		close(result.ch)
-		result = nil
-		err = fmt.Errorf("consumer[%s]: write to conn failed, full content is %d, but %d writed", client.id, len(content), n)
+	return
+}
+
+func (client *ConsumerClient) Push(events *Events) (ok bool, err error) {
+	if events == nil {
 		return
 	}
-	return
-}
-
-func (client *ConsumerClient) Ping() (ok bool) {
-
-	return
-}
-
-func (client *ConsumerClient) Pong() {
-
-	return
-}
-
-func (client *ConsumerClient) Push(events *Events) (ok bool) {
-	// todo
-	// todo write(push, encode(events))
-	// todo ok = <- result.Done()
+	p, encodeErr := events.Encode()
+	if encodeErr != nil {
+		err = fmt.Errorf("consumer[%s]: push events failed, %v", client.id, encodeErr)
+		return
+	}
+	result, writeErr := client.write(PushEvents, p)
+	if writeErr != nil {
+		err = fmt.Errorf("consumer[%s]: push events failed, %v", client.id, writeErr)
+		return
+	}
+	ok = result.done()
 	return
 }
 
@@ -155,12 +112,6 @@ func (client *ConsumerClient) listen() {
 	ctx, cancel := context.WithCancel(context.TODO())
 	client.stop = cancel
 	go func(ctx context.Context, client *ConsumerClient) {
-		p := make([]byte, 4096)
-		littleEndianBlock := make([]byte, 8)
-		requestId := uint64(0)
-		method := uint64(0)
-		bodyLen := uint64(0)
-		buf := bytes.NewBuffer(make([]byte, 0, 4*commons.MEGABYTE))
 		for {
 			stopped := false
 			select {
@@ -168,54 +119,12 @@ func (client *ConsumerClient) listen() {
 				stopped = true
 				break
 			default:
-				n, readErr := client.conn.Read(p)
-				if readErr == io.EOF {
-					client.close()
+				requestId, method, body, readErr := ReadMessage(client.conn)
+				if readErr != nil {
+					client.Close()
 					break
 				}
-				buf.Write(p[0:n])
-				for {
-					if requestId == 0 {
-						if buf.Len() < 8 {
-							break
-						}
-						_, _ = buf.Read(littleEndianBlock)
-						requestId = binary.LittleEndian.Uint64(littleEndianBlock)
-					}
-					if method == 0 {
-						if buf.Len() < 8 {
-							break
-						}
-						_, _ = buf.Read(littleEndianBlock)
-						method = binary.LittleEndian.Uint64(littleEndianBlock)
-					}
-					if bodyLen == 0 {
-						if buf.Len() < 8 {
-							break
-						}
-						_, _ = buf.Read(littleEndianBlock)
-						bodyLen = binary.LittleEndian.Uint64(littleEndianBlock)
-						if bodyLen == 0 {
-							client.handle(requestId, method, []byte{})
-							requestId = 0
-							method = 0
-							bodyLen = 0
-							break
-						}
-					}
-					if uint64(buf.Len()) < bodyLen {
-						break
-					}
-					body := make([]byte, bodyLen)
-					_, _ = buf.Read(body)
-					client.handle(requestId, method, body)
-					requestId = 0
-					method = 0
-					bodyLen = 0
-				}
-				if buf.Len() == 0 {
-					buf.Reset()
-				}
+				client.handle(requestId, method, body)
 			}
 			if stopped {
 				break
@@ -225,10 +134,6 @@ func (client *ConsumerClient) listen() {
 }
 
 func (client *ConsumerClient) handle(requestId uint64, method uint64, body []byte) {
-	if method == Ping {
-		client.Pong()
-		return
-	}
 	result0, has := client.results.LoadAndDelete(requestId)
 	if !has {
 		return
@@ -238,9 +143,6 @@ func (client *ConsumerClient) handle(requestId uint64, method uint64, body []byt
 		return
 	}
 	switch method {
-	case Pong:
-		result.succeed()
-		break
 	case EventsHandled:
 		if body[0] == '1' {
 			result.succeed()
@@ -256,7 +158,7 @@ func (client *ConsumerClient) handle(requestId uint64, method uint64, body []byt
 	return
 }
 
-func (client *ConsumerClient) close() {
+func (client *ConsumerClient) Close() {
 	client.lock.Lock()
 	if client.closed {
 		client.lock.Unlock()
@@ -278,7 +180,7 @@ func (client *ConsumerClient) close() {
 
 type Consumer struct {
 	Name          string
-	Store         badger.DB
+	store         badger.DB
 	lock          sync.Mutex
 	clients       *commons.Ring
 	clientCloseCh chan string
@@ -290,14 +192,15 @@ func (consumer *Consumer) AppendClient(conn net.Conn) {
 	if conn == nil {
 		return
 	}
-	id := fmt.Sprintf("%d", consumer.clients.Size())
-	// todo
 	client := &ConsumerClient{
-		id:      id,
-		lock:    sync.Mutex{},
-		conn:    conn,
-		closed:  false,
-		closeCh: consumer.clientCloseCh,
+		id:              fmt.Sprintf("%d", consumer.clients.Size()),
+		lock:            sync.Mutex{},
+		latestRequestId: 0,
+		results:         sync.Map{},
+		conn:            conn,
+		closed:          false,
+		stop:            nil,
+		closeCh:         consumer.clientCloseCh,
 	}
 	consumer.clients.Append(client)
 	client.listen()
@@ -316,4 +219,23 @@ func (consumer *Consumer) listenClientClose() {
 			}
 		}
 	}(consumer)
+}
+
+func (consumer *Consumer) LatestEventBlockNo() {
+
+}
+
+func (consumer *Consumer) OnlineClients() {
+
+}
+
+func (consumer *Consumer) PushEvents(events *Events) (err error) {
+	consumer.lock.Lock()
+	defer consumer.lock.Unlock()
+
+	return
+}
+
+func (consumer *Consumer) Close() {
+
 }
