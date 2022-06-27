@@ -41,7 +41,7 @@ func TestTcpConnect(t *testing.T) {
 	body := []byte("0123456789")
 	p := make([]byte, 16+len(body))
 	binary.LittleEndian.PutUint64(p[0:8], uint64(len(body)))
-	binary.LittleEndian.PutUint64(p[8:16], 0)
+	binary.LittleEndian.PutUint64(p[8:16], 10)
 	copy(p[16:], body)
 	fmt.Println(conn.Write(p[:1]))
 	fmt.Println(conn.Write(p[1:8]))
