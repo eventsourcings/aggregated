@@ -1,13 +1,12 @@
 package core
 
 import (
-	"context"
 	"fmt"
 	"github.com/dgraph-io/badger/v3"
 	"github.com/eventsourcings/aggregated/commons"
+	"github.com/eventsourcings/aggregated/proto"
 	"net"
 	"sync"
-	"sync/atomic"
 )
 
 type ConsumeResult struct {
@@ -48,14 +47,12 @@ func (r *ConsumeResult) failed() {
 }
 
 type ConsumerClient struct {
-	id              string
-	lock            sync.Mutex
-	latestRequestId uint64
-	results         sync.Map
-	conn            net.Conn
-	closed          bool
-	stop            func()
-	closeCh         chan<- string
+	id      string
+	lock    sync.Mutex
+	conn    net.Conn
+	closed  bool
+	stop    func()
+	closeCh chan<- string
 }
 
 func (client *ConsumerClient) Key() (key string) {
@@ -63,100 +60,41 @@ func (client *ConsumerClient) Key() (key string) {
 	return
 }
 
-func (client *ConsumerClient) write(method uint64, p []byte) (result *ConsumeResult, err error) {
-	if p == nil {
-		p = []byte{}
-	}
-	client.lock.Lock()
-	defer client.lock.Unlock()
-	if client.closed {
-		err = fmt.Errorf("consumer[%s]: cant write to a closed conn", client.id)
-		return
-	}
-	requestId := atomic.AddUint64(&client.latestRequestId, 1)
-	result = &ConsumeResult{
-		lock:   sync.Mutex{},
-		closed: false,
-		ch:     make(chan bool),
-	}
-	writeErr := WriteMessage(requestId, method, p, client.conn)
-	if writeErr != nil {
-		client.results.Delete(requestId)
-		result.failed()
-		result = nil
-		err = fmt.Errorf("consumer[%s]: write to conn failed, %v", client.id, writeErr)
-		return
-	}
-	// todo remove result
-	// todo return reader channel, if timeout then ping, if not pong , return err can close client
-	return
-}
-
 func (client *ConsumerClient) Push(events *Events) (ok bool, err error) {
 	if events == nil {
 		return
 	}
+	client.lock.Lock()
+	defer client.lock.Unlock()
+	if client.closed {
+		err = fmt.Errorf("consumer[%s]: cant push events to a closed conn", client.id)
+		return
+	}
 	p, encodeErr := events.Encode()
 	if encodeErr != nil {
-		err = fmt.Errorf("consumer[%s]: push events failed, %v", client.id, encodeErr)
+		err = fmt.Errorf("consumer[%s]: push events failed cause encode events failed, %v", client.id, encodeErr)
 		return
 	}
-	result, writeErr := client.write(PushEvents, p)
+	writeErr := proto.WriteMessage(proto.PushEvents, p, client.conn)
 	if writeErr != nil {
-		err = fmt.Errorf("consumer[%s]: push events failed, %v", client.id, writeErr)
+		err = fmt.Errorf("consumer[%s]: push events to conn failed, %v", client.id, writeErr)
 		return
 	}
-	ok = result.done()
-	return
-}
-
-func (client *ConsumerClient) listen() {
-	ctx, cancel := context.WithCancel(context.TODO())
-	client.stop = cancel
-	go func(ctx context.Context, client *ConsumerClient) {
-		for {
-			stopped := false
-			select {
-			case <-ctx.Done():
-				stopped = true
-				break
-			default:
-				requestId, method, body, readErr := ReadMessage(client.conn)
-				if readErr != nil {
-					client.Close()
-					break
-				}
-				client.handle(requestId, method, body)
-			}
-			if stopped {
-				break
-			}
-		}
-	}(ctx, client)
-}
-
-func (client *ConsumerClient) handle(requestId uint64, method uint64, body []byte) {
-	result0, has := client.results.LoadAndDelete(requestId)
-	if !has {
+	method, body, readErr := proto.ReadMessage(client.conn)
+	if readErr != nil {
+		client.Close()
+		err = fmt.Errorf("consumer[%s]: push events to conn succeed but receive handle result failed, %v", client.id, readErr)
 		return
 	}
-	result, ok := result0.(*ConsumeResult)
-	if !ok {
+	if method != proto.EventsHandled {
+		client.Close()
+		err = fmt.Errorf("consumer[%s]: push events to conn succeed but received dismatched handle result, received method is %v", client.id, method)
 		return
 	}
-	switch method {
-	case EventsHandled:
-		if body[0] == '1' {
-			result.succeed()
-		} else {
-			result.failed()
-		}
-		break
-	default:
-		// undefined method
-		result.failed()
-		break
+	if len(body) == 0 {
+		return
 	}
+	ok = body[0] == '1'
 	return
 }
 
@@ -171,13 +109,6 @@ func (client *ConsumerClient) Close() {
 	client.stop()
 	_ = client.conn.Close()
 	client.closeCh <- client.id
-	// close all results
-	client.results.Range(func(key, value interface{}) bool {
-		result := value.(*ConsumeResult)
-		result.failed()
-		return true
-	})
-	client.results = sync.Map{}
 }
 
 type Consumer struct {
@@ -195,17 +126,14 @@ func (consumer *Consumer) AppendClient(conn net.Conn) {
 		return
 	}
 	client := &ConsumerClient{
-		id:              fmt.Sprintf("%d", consumer.clients.Size()),
-		lock:            sync.Mutex{},
-		latestRequestId: 0,
-		results:         sync.Map{},
-		conn:            conn,
-		closed:          false,
-		stop:            nil,
-		closeCh:         consumer.clientCloseCh,
+		id:      fmt.Sprintf("%d", consumer.clients.Size()),
+		lock:    sync.Mutex{},
+		conn:    conn,
+		closed:  false,
+		stop:    nil,
+		closeCh: consumer.clientCloseCh,
 	}
 	consumer.clients.Append(client)
-	client.listen()
 }
 
 func (consumer *Consumer) listenClientClose() {
