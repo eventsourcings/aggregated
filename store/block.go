@@ -269,8 +269,8 @@ func (bs *Blocks) Write(p []byte) (blockNo uint64, err error) {
 		idxs[i] = idx
 		blocks[i] = bs.encodeBlock(blockContent, 0, 0)
 	}
-	bs.writing.Store(idxs[0], idxs[0])
 	for i, block := range blocks {
+		bs.writing.Store(idxs[i], idxs[i])
 		prev := uint64(0)
 		next := uint64(0)
 		if i > 0 {
@@ -282,18 +282,18 @@ func (bs *Blocks) Write(p []byte) (blockNo uint64, err error) {
 		bs.updateBlockStickyNo(block, prev, next)
 		writeBlockErr := bs.writeBlock(block, idxs[i])
 		if writeBlockErr != nil {
-			bs.writing.Delete(idxs[0])
+			bs.writing.Delete(idxs[i])
 			bs.counter.Done()
 			err = fmt.Errorf("blocks: write failed, %v", writeBlockErr)
 			return
 		}
+		bs.writing.Delete(idxs[i])
 	}
 	blockNo = idxs[0]
 	bs.cache.Set(blockNo, &Entry{
 		BlockNos: idxs,
 		Value:    p,
 	}, int64(len(p)))
-	bs.writing.Delete(idxs[0])
 	if atomic.LoadUint64(&bs.lastBlockNo) < blockNo {
 		atomic.StoreUint64(&bs.lastBlockNo, blockNo)
 	}
