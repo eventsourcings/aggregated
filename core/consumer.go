@@ -87,6 +87,8 @@ func (client *ConsumerClient) write(method uint64, p []byte) (result *ConsumeRes
 		err = fmt.Errorf("consumer[%s]: write to conn failed, %v", client.id, writeErr)
 		return
 	}
+	// todo remove result
+	// todo return reader channel, if timeout then ping, if not pong , return err can close client
 	return
 }
 
@@ -221,7 +223,7 @@ func (consumer *Consumer) listenClientClose() {
 	}(consumer)
 }
 
-func (consumer *Consumer) LatestEventBlockNo() {
+func (consumer *Consumer) LatestEvent() {
 
 }
 
