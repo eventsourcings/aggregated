@@ -352,8 +352,11 @@ func (bs *Blocks) List(startBlockNo uint64, endBlockNo uint64) (entries EntryLis
 			time.Sleep(500 * time.Microsecond)
 		}
 		if currentEntry == nil {
-			err = fmt.Errorf("blocks: list from %d to %d failed, read %d block timeout", startBlockNo, endBlockNo, currentBlockNo)
-			return
+			// maybe bad block
+			currentBlockNo++
+			continue
+			//err = fmt.Errorf("blocks: list from %d to %d failed, read %d block timeout", startBlockNo, endBlockNo, currentBlockNo)
+			//return
 		}
 		entries.Append(currentEntry)
 		vacant := currentEntry.BlockNos.Vacant()
@@ -446,6 +449,7 @@ func (bs *Blocks) read(blockNo uint64) (entry *Entry, has bool, err error) {
 		return
 	}
 	if !has {
+		// bad block
 		return
 	}
 	if len(group) == 1 {
@@ -491,7 +495,8 @@ func (bs *Blocks) load(blockNo uint64, group map[uint64][]byte) (has bool, err e
 				return
 			}
 			if !hasPrevContent {
-				err = fmt.Errorf("blocks: read prev of %d block failed, prev was not found", blockNo)
+				// bad block
+				//err = fmt.Errorf("blocks: read prev of %d block failed, prev was not found", blockNo)
 				return
 			}
 		}
@@ -505,7 +510,8 @@ func (bs *Blocks) load(blockNo uint64, group map[uint64][]byte) (has bool, err e
 				return
 			}
 			if !hasNextContent {
-				err = fmt.Errorf("blocks: read next of %d block failed, next was not found", blockNo)
+				// bad block
+				//err = fmt.Errorf("blocks: read next of %d block failed, next was not found", blockNo)
 				return
 			}
 		}
