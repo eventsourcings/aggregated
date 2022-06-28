@@ -5,51 +5,20 @@ import (
 	"github.com/dgraph-io/badger/v3"
 	"github.com/eventsourcings/aggregated/commons"
 	"github.com/eventsourcings/aggregated/proto"
-	"net"
+	"io"
 	"sync"
 )
 
-type ConsumeResult struct {
-	lock   sync.Mutex
-	closed bool
-	ch     chan bool
-}
-
-func (r *ConsumeResult) done() (succeed bool) {
-	result, ok := <-r.ch
-	if !ok {
-		return
-	}
-	succeed = result
-	return
-}
-
-func (r *ConsumeResult) succeed() {
-	r.lock.Lock()
-	defer r.lock.Unlock()
-	if r.closed {
-		return
-	}
-	r.ch <- true
-	r.closed = true
-	close(r.ch)
-}
-
-func (r *ConsumeResult) failed() {
-	r.lock.Lock()
-	defer r.lock.Unlock()
-	if r.closed {
-		return
-	}
-	r.ch <- false
-	r.closed = true
-	close(r.ch)
+type ConsumerConn interface {
+	io.Reader
+	io.Writer
+	io.Closer
 }
 
 type ConsumerClient struct {
 	id      string
 	lock    sync.Mutex
-	conn    net.Conn
+	conn    ConsumerConn
 	closed  bool
 	stop    func()
 	closeCh chan<- string
@@ -119,7 +88,7 @@ type Consumer struct {
 	clientCloseCh chan string
 }
 
-func (consumer *Consumer) AppendClient(conn net.Conn) {
+func (consumer *Consumer) AppendClient(conn ConsumerConn) {
 	consumer.lock.Lock()
 	defer consumer.lock.Unlock()
 	if conn == nil {
@@ -162,10 +131,16 @@ func (consumer *Consumer) OnlineClients() {
 func (consumer *Consumer) PushEvents(events *Events) (err error) {
 	consumer.lock.Lock()
 	defer consumer.lock.Unlock()
-
 	return
 }
 
 func (consumer *Consumer) Close() {
-
+	consumer.lock.Lock()
+	defer consumer.lock.Unlock()
+	clientSize := consumer.clients.Size()
+	for i := 0; i < clientSize; i++ {
+		client := consumer.clients.Next().(*ConsumerClient)
+		client.Close()
+	}
+	close(consumer.clientCloseCh)
 }
