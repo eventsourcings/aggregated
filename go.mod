@@ -5,6 +5,7 @@ go 1.18
 require (
 	github.com/dgraph-io/badger/v3 v3.2103.2
 	github.com/dgraph-io/ristretto v0.1.0
+	github.com/google/uuid v1.3.0
 	github.com/shirou/gopsutil/v3 v3.22.5
 	github.com/valyala/bytebufferpool v1.0.0
 	github.com/vmihailenco/msgpack/v5 v5.3.5

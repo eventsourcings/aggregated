@@ -5,25 +5,11 @@ import (
 	"fmt"
 	"github.com/eventsourcings/aggregated/commons"
 	"github.com/eventsourcings/aggregated/store"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
-
-type FakeSequence struct {
-	i int64
-}
-
-func (f *FakeSequence) Next() (idx uint64, err error) {
-	idx = uint64(atomic.AddInt64(&f.i, 1))
-	return
-}
-
-func (f *FakeSequence) Close() (err error) {
-	return
-}
 
 func TestOpenBlocks(t *testing.T) {
 	s := `G:\tmp\blocks\t1.bs`
@@ -31,10 +17,7 @@ func TestOpenBlocks(t *testing.T) {
 		Path:          s,
 		BlockSize:     64 * commons.BYTE,
 		MaxCachedSize: 0,
-		Sequence: &FakeSequence{
-			i: -1,
-		},
-		Meta: map[string]string{},
+		Meta:          map[string]string{},
 	})
 	if bsErr != nil {
 		t.Error(bsErr)
@@ -48,10 +31,7 @@ func TestBlocks_Write(t *testing.T) {
 		Path:          s,
 		BlockSize:     64 * commons.BYTE,
 		MaxCachedSize: 0,
-		Sequence: &FakeSequence{
-			i: -1,
-		},
-		Meta: map[string]string{},
+		Meta:          map[string]string{},
 	})
 	if bsErr != nil {
 		t.Error(bsErr)
@@ -72,10 +52,7 @@ func TestBlocks_Write_Multi(t *testing.T) {
 		Path:          s,
 		BlockSize:     64 * commons.BYTE,
 		MaxCachedSize: 0,
-		Sequence: &FakeSequence{
-			i: -1,
-		},
-		Meta: map[string]string{},
+		Meta:          map[string]string{},
 	})
 	if bsErr != nil {
 		t.Error(bsErr)
@@ -84,7 +61,7 @@ func TestBlocks_Write_Multi(t *testing.T) {
 	for i := 0; i < 100000; i++ {
 		wg.Add(1)
 		go func(wg *sync.WaitGroup, bs *store.Blocks, no int) {
-			_, _ = bs.Write([]byte(fmt.Sprintf("%050d", no+1)))
+			_, _, _ = bs.Write([]byte(fmt.Sprintf("%050d", no+1)))
 			wg.Done()
 		}(wg, bs, i)
 	}
@@ -100,20 +77,15 @@ func TestBlocks_Read(t *testing.T) {
 		Path:          s,
 		BlockSize:     64 * commons.BYTE,
 		MaxCachedSize: 0,
-		Sequence: &FakeSequence{
-			i: -1,
-		},
-		Meta: map[string]string{},
+		Meta:          map[string]string{},
 	})
 	if bsErr != nil {
 		t.Error(bsErr)
 	}
-	//p, has, readErr := bs.Read(6)
-	//fmt.Println(string(p), has, readErr)
-	e, has, readErr := bs.Read(0)
-	fmt.Println(string(e.Value), e.BlockNos, has, readErr)
-	e, has, readErr = bs.Read(4)
-	fmt.Println(string(e.Value), e.BlockNos, has, readErr)
+	e, has, readErr := bs.Read(1)
+	fmt.Println(string(e.Value), e.BeginBlockNo, e.EndBlockNo, has, readErr)
+	e, has, readErr = bs.Read(5)
+	fmt.Println(string(e.Value), e.BeginBlockNo, e.EndBlockNo, has, readErr)
 	e, has, readErr = bs.Read(7)
 	fmt.Println(has, readErr)
 }
@@ -124,58 +96,16 @@ func TestBlocks_List(t *testing.T) {
 		Path:          s,
 		BlockSize:     64 * commons.BYTE,
 		MaxCachedSize: 0,
-		Sequence: &FakeSequence{
-			i: -1,
-		},
-		Meta: map[string]string{},
+		Meta:          map[string]string{},
 	})
 	if bsErr != nil {
 		t.Error(bsErr)
 	}
-	list, listErr := bs.List(0, 0)
+	list, listErr := bs.Entries(0, 10)
 	if listErr != nil {
 		t.Fatal(listErr)
 	}
 	fmt.Println(list)
-}
-
-func TestBlockNoList_Vacant(t *testing.T) {
-	nos := store.BlockNoList{0, 1, 4, 6, 8}
-	fmt.Println(nos, nos.Vacant(), nos.Vacant().SuccessiveSegments())
-	nos = store.BlockNoList{0, 1, 2, 3, 4, 5, 6, 7, 8}
-	fmt.Println(nos, nos.Vacant(), nos.Vacant().SuccessiveSegments())
-	s := []int{0, 1, 4, 6, 8}
-	fmt.Println(sort.SearchInts(s, 0))
-	fmt.Println(sort.SearchInts(s, 4))
-	fmt.Println(sort.SearchInts(s, 9))
-
-}
-
-func TestEntryList_Append(t *testing.T) {
-	list := store.EntryList{}
-	for i := 0; i < 5; i++ {
-		list.Append(&store.Entry{
-			BlockNos: []uint64{uint64(i)},
-			Value:    nil,
-		})
-	}
-	list.Append(&store.Entry{
-		BlockNos: []uint64{uint64(1)},
-		Value:    nil,
-	})
-	fmt.Println(len(list))
-
-}
-
-func TestEntryList_Contains(t *testing.T) {
-	list := store.EntryList{}
-	for i := 0; i < 5; i++ {
-		list.Append(&store.Entry{
-			BlockNos: []uint64{uint64(i)},
-			Value:    nil,
-		})
-	}
-	fmt.Println(list.Contains(0), list.Contains(2), list.Contains(4), list.Contains(5))
 }
 
 func TestBlocks_Tail(t *testing.T) {
@@ -184,10 +114,7 @@ func TestBlocks_Tail(t *testing.T) {
 		Path:          s,
 		BlockSize:     64 * commons.BYTE,
 		MaxCachedSize: 0,
-		Sequence: &FakeSequence{
-			i: -1,
-		},
-		Meta: map[string]string{},
+		Meta:          map[string]string{},
 	})
 	if bsErr != nil {
 		t.Error(bsErr)
@@ -215,10 +142,36 @@ func TestBlocks_Tail(t *testing.T) {
 	}
 	wg.Wait()
 	for i := 0; i < 10; i++ {
-		bno, wErr := bs.Write([]byte(fmt.Sprintf("%d:%s", i, time.Now().String())))
+		_, bno, wErr := bs.Write([]byte(fmt.Sprintf("%d:%s", i, time.Now().String())))
 		fmt.Println(bno, wErr)
 	}
 	time.Sleep(5 * time.Second)
 	bs.Close()
 	time.Sleep(5 * time.Second)
+}
+
+type BlockNo struct {
+	Value   uint64
+	padding [7]uint64
+}
+
+func (bn *BlockNo) Next(n uint64) (beg uint64, end uint64) {
+	end = atomic.AddUint64(&bn.Value, n)
+	beg = end - n + 1
+	return
+}
+
+func TestBlockNo(t *testing.T) {
+	wg := new(sync.WaitGroup)
+	bn := &BlockNo{}
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(bn *BlockNo, wg *sync.WaitGroup, n uint64) {
+			beg, end := bn.Next(n)
+			fmt.Println(n, beg, end, end-beg)
+			wg.Done()
+		}(bn, wg, uint64(i+1))
+	}
+	wg.Wait()
+	fmt.Println(bn.Value, bn.padding)
 }
