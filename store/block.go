@@ -87,10 +87,10 @@ func (meta BlockMeta) id() (v string) {
 }
 
 type BlocksOpenOptions struct {
-	Path          string
-	BlockCapacity uint64
-	MaxCachedSize uint64
-	Meta          map[string]string
+	Path                string
+	BlockCapacity       uint64
+	MaxCachedMemorySize uint64
+	Meta                map[string]string
 }
 
 func OpenBlocks(options BlocksOpenOptions) (bs *Blocks, err error) {
@@ -122,19 +122,19 @@ func OpenBlocks(options BlocksOpenOptions) (bs *Blocks, err error) {
 		err = fmt.Errorf("open blocks failed, %s perm be 0666", path)
 		return
 	}
-	maxCachedSize := options.MaxCachedSize
-	if maxCachedSize < 1 {
+	maxCachedMemorySize := options.MaxCachedMemorySize
+	if maxCachedMemorySize < 1 {
 		memory, getMemoryErr := mem.VirtualMemory()
 		if getMemoryErr != nil {
-			maxCachedSize = 64 * commons.MEGABYTE
+			maxCachedMemorySize = 64 * commons.MEGABYTE
 		} else {
-			maxCachedSize = memory.Free / 8
+			maxCachedMemorySize = memory.Free / 8
 		}
 	}
-	maxCachedBlockNum := int64(math.Ceil(float64(maxCachedSize) / float64(1*commons.KILOBYTE)))
+	maxCachedEntries := int64(math.Ceil(float64(maxCachedMemorySize) / float64(1*commons.KILOBYTE)))
 	cache, cacheErr := ristretto.NewCache(&ristretto.Config{
-		NumCounters:        maxCachedBlockNum * 10,
-		MaxCost:            int64(maxCachedSize),
+		NumCounters:        maxCachedEntries * 10,
+		MaxCost:            int64(maxCachedMemorySize),
 		BufferItems:        64,
 		Metrics:            false,
 		IgnoreInternalCost: true,
@@ -225,11 +225,11 @@ func OpenBlocks(options BlocksOpenOptions) (bs *Blocks, err error) {
 		}
 	}
 	// update cache
-	maxCachedBlockNum = int64(math.Ceil(float64(maxCachedSize) / float64(bs.blockCapacity)))
-	bs.cache.UpdateMaxCost(maxCachedBlockNum)
+	maxCachedEntries = int64(math.Ceil(float64(maxCachedMemorySize) / float64(bs.blockCapacity)))
+	bs.cache.UpdateMaxCost(maxCachedEntries)
 	// prepare cache
 	if bs.lastWroteBlockNo.Value() > 0 {
-		cachedLength := uint64(maxCachedBlockNum)
+		cachedLength := uint64(maxCachedEntries)
 		if bs.lastWroteBlockNo.Value() < cachedLength {
 			cachedLength = bs.lastWroteBlockNo.Value()
 		}
@@ -281,7 +281,7 @@ func (bs *Blocks) Write(p []byte) (entryBeginBlockNo uint64, entryEndBlockNo uin
 	entryEndBlockNo = end
 	if blockNumber == 1 {
 		block := NewBlock(bs.blockCapacity, 0, 0)
-		writeBlockErr := bs.writeBlock(block, entryBeginBlockNo)
+		writeBlockErr := bs.writeBlock(entryBeginBlockNo, block)
 		if writeBlockErr != nil {
 			bs.counter.Done()
 			err = fmt.Errorf("blocks: write failed, %v", writeBlockErr)
@@ -293,6 +293,7 @@ func (bs *Blocks) Write(p []byte) (entryBeginBlockNo uint64, entryEndBlockNo uin
 		return
 	}
 	blockNo := entryBeginBlockNo
+	blocks := make([]Block, 0, blockNumber)
 	for i := uint64(0); i < blockNumber; i++ {
 		begIdx := i * bs.blockContentCapacity
 		endIdx := contentLen
@@ -310,13 +311,14 @@ func (bs *Blocks) Write(p []byte) (entryBeginBlockNo uint64, entryEndBlockNo uin
 		}
 		block := NewBlock(bs.blockCapacity, prev, next)
 		block.Write(blockContent)
-		writeBlockErr := bs.writeBlock(block, blockNo)
-		if writeBlockErr != nil {
-			bs.counter.Done()
-			err = fmt.Errorf("blocks: write failed, %v", writeBlockErr)
-			return
-		}
+		blocks = append(blocks, block)
 		blockNo++
+	}
+	writeBlockErr := bs.writeBlocks(entryBeginBlockNo, blocks)
+	if writeBlockErr != nil {
+		bs.counter.Done()
+		err = fmt.Errorf("blocks: write failed, %v", writeBlockErr)
+		return
 	}
 	bs.lastWroteBlockNo.Set(beg)
 	bs.cache.Set(entryBeginBlockNo, &Entry{
@@ -328,7 +330,31 @@ func (bs *Blocks) Write(p []byte) (entryBeginBlockNo uint64, entryEndBlockNo uin
 	return
 }
 
-func (bs *Blocks) writeBlock(block []byte, blockNo uint64) (err error) {
+func (bs *Blocks) writeBlocks(blockNo uint64, blocks []Block) (err error) {
+	fileOffset := int64((blockNo-1)*bs.blockCapacity) + blocksMetaSize
+	buf := bytebufferpool.Get()
+	for _, block := range blocks {
+		_, _ = buf.Write(block)
+	}
+	p := buf.Bytes()
+	pLen := len(p)
+	bytebufferpool.Put(buf)
+	for {
+		n, writeErr := bs.file.WriteAt(p, fileOffset)
+		if writeErr != nil {
+			err = fmt.Errorf("blocks: write %d block failed, %v", blockNo, writeErr)
+			return
+		}
+		if n == pLen {
+			break
+		}
+		p = p[n:]
+		fileOffset = fileOffset + int64(n)
+	}
+	return
+}
+
+func (bs *Blocks) writeBlock(blockNo uint64, block []byte) (err error) {
 	blockLen := len(block)
 	fileOffset := int64((blockNo-1)*bs.blockCapacity) + blocksMetaSize
 	for {
@@ -376,7 +402,7 @@ func (bs *Blocks) Entries(offset uint64, length uint64) (entries EntryList, err 
 	return
 }
 
-func (bs *Blocks) Tail(ctx context.Context, offset uint64, interval time.Duration) (entries <-chan EntryList, stop func(), err error) {
+func (bs *Blocks) Tail(ctx context.Context, offset uint64, interval time.Duration) (entries <-chan EntryList, errors <-chan error, stop func(), err error) {
 	if atomic.LoadInt64(&bs.closed) > 0 {
 		err = fmt.Errorf("blocks: tail failed cause blocks was closed")
 		return
@@ -386,32 +412,44 @@ func (bs *Blocks) Tail(ctx context.Context, offset uint64, interval time.Duratio
 	}
 	ctx, stop = context.WithCancel(ctx)
 	entriesCh := make(chan EntryList, 4096)
-	go func(ctx context.Context, bs *Blocks, startBlockNo uint64, interval time.Duration, entriesCh chan EntryList) {
+	errorsCh := make(chan error, 64)
+	go func(ctx context.Context, bs *Blocks, startBlockNo uint64, interval time.Duration, entriesCh chan EntryList, errorsCh chan error) {
 		for {
 			stopped := false
 			select {
 			case <-ctx.Done():
 				stopped = true
 				break
-			case <-time.After(interval):
+			default:
 				if atomic.LoadInt64(&bs.closed) > 0 {
 					close(entriesCh)
+					close(errorsCh)
 					stopped = true
 					break
 				}
 				lastEntry, hasLast, readLastErr := bs.Read(bs.lastWroteBlockNo.Value())
-				if readLastErr != nil || !hasLast {
+				if readLastErr != nil {
+					errorsCh <- fmt.Errorf("blocks: tail failed, read latest wroted block failed, %v", readLastErr)
+					time.Sleep(interval)
+					break
+				}
+				if !hasLast {
+					time.Sleep(interval)
 					break
 				}
 				if startBlockNo > lastEntry.begBlockNo {
+					time.Sleep(interval)
 					break
 				}
 				length := lastEntry.begBlockNo - startBlockNo + 1
 				list, listErr := bs.Entries(startBlockNo, length)
 				if listErr != nil {
+					errorsCh <- fmt.Errorf("blocks: tail failed, list latest wroted block failed, %v", listErr)
+					time.Sleep(interval)
 					break
 				}
 				if list == nil || len(list) == 0 {
+					time.Sleep(interval)
 					break
 				}
 				entriesCh <- list
@@ -421,8 +459,9 @@ func (bs *Blocks) Tail(ctx context.Context, offset uint64, interval time.Duratio
 				break
 			}
 		}
-	}(ctx, bs, offset, interval, entriesCh)
+	}(ctx, bs, offset, interval, entriesCh, errorsCh)
 	entries = entriesCh
+	errors = errorsCh
 	return
 }
 
@@ -459,7 +498,6 @@ func (bs *Blocks) read(blockNo uint64) (entry *Entry, has bool, err error) {
 		return
 	}
 	buf := bytebufferpool.Get()
-	defer bytebufferpool.Put(buf)
 	_, _ = buf.Write(content)
 	endBlock := blockNo
 	for {
@@ -469,15 +507,19 @@ func (bs *Blocks) read(blockNo uint64) (entry *Entry, has bool, err error) {
 		nextBlock, hasNextBlock, readNextErr := bs.readBlock(next)
 		if readNextErr != nil {
 			err = readNextErr
-			return
+			break
 		}
 		if !hasNextBlock {
 			err = fmt.Errorf("blocks: read %d of %d block failed, not exist", next, blockNo)
-			return
+			break
 		}
 		_, next, content = nextBlock.Read()
 		_, _ = buf.Write(content)
 		endBlock++
+	}
+	if err != nil {
+		bytebufferpool.Put(buf)
+		return
 	}
 	entry = &Entry{
 		begBlockNo: blockNo,

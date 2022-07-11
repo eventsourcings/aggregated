@@ -14,10 +14,10 @@ import (
 func TestOpenBlocks(t *testing.T) {
 	s := `G:\tmp\blocks\t1.bs`
 	bs, bsErr := store.OpenBlocks(store.BlocksOpenOptions{
-		Path:          s,
-		BlockCapacity: 64 * commons.BYTE,
-		MaxCachedSize: 0,
-		Meta:          map[string]string{},
+		Path:                s,
+		BlockCapacity:       64 * commons.BYTE,
+		MaxCachedMemorySize: 0,
+		Meta:                map[string]string{},
 	})
 	if bsErr != nil {
 		t.Error(bsErr)
@@ -28,10 +28,10 @@ func TestOpenBlocks(t *testing.T) {
 func TestBlocks_Write(t *testing.T) {
 	s := `G:\tmp\blocks\t1.bs`
 	bs, bsErr := store.OpenBlocks(store.BlocksOpenOptions{
-		Path:          s,
-		BlockCapacity: 64 * commons.BYTE,
-		MaxCachedSize: 0,
-		Meta:          map[string]string{},
+		Path:                s,
+		BlockCapacity:       64 * commons.BYTE,
+		MaxCachedMemorySize: 0,
+		Meta:                map[string]string{},
 	})
 	if bsErr != nil {
 		t.Error(bsErr)
@@ -49,10 +49,10 @@ func TestBlocks_Write_Multi(t *testing.T) {
 	wg := new(sync.WaitGroup)
 	s := `G:\tmp\blocks\t2.bs`
 	bs, bsErr := store.OpenBlocks(store.BlocksOpenOptions{
-		Path:          s,
-		BlockCapacity: 64 * commons.BYTE,
-		MaxCachedSize: 0,
-		Meta:          map[string]string{},
+		Path:                s,
+		BlockCapacity:       1 * commons.KILOBYTE,
+		MaxCachedMemorySize: 0,
+		Meta:                map[string]string{},
 	})
 	if bsErr != nil {
 		t.Error(bsErr)
@@ -74,10 +74,10 @@ func TestBlocks_Write_Multi(t *testing.T) {
 func TestBlocks_Read(t *testing.T) {
 	s := `G:\tmp\blocks\t1.bs`
 	bs, bsErr := store.OpenBlocks(store.BlocksOpenOptions{
-		Path:          s,
-		BlockCapacity: 64 * commons.BYTE,
-		MaxCachedSize: 0,
-		Meta:          map[string]string{},
+		Path:                s,
+		BlockCapacity:       64 * commons.BYTE,
+		MaxCachedMemorySize: 0,
+		Meta:                map[string]string{},
 	})
 	if bsErr != nil {
 		t.Error(bsErr)
@@ -93,10 +93,10 @@ func TestBlocks_Read(t *testing.T) {
 func TestBlocks_List(t *testing.T) {
 	s := `G:\tmp\blocks\t1.bs`
 	bs, bsErr := store.OpenBlocks(store.BlocksOpenOptions{
-		Path:          s,
-		BlockCapacity: 64 * commons.BYTE,
-		MaxCachedSize: 0,
-		Meta:          map[string]string{},
+		Path:                s,
+		BlockCapacity:       64 * commons.BYTE,
+		MaxCachedMemorySize: 0,
+		Meta:                map[string]string{},
 	})
 	if bsErr != nil {
 		t.Error(bsErr)
@@ -111,10 +111,10 @@ func TestBlocks_List(t *testing.T) {
 func TestBlocks_Tail(t *testing.T) {
 	s := `G:\tmp\blocks\t1.bs`
 	bs, bsErr := store.OpenBlocks(store.BlocksOpenOptions{
-		Path:          s,
-		BlockCapacity: 64 * commons.BYTE,
-		MaxCachedSize: 0,
-		Meta:          map[string]string{},
+		Path:                s,
+		BlockCapacity:       64 * commons.BYTE,
+		MaxCachedMemorySize: 0,
+		Meta:                map[string]string{},
 	})
 	if bsErr != nil {
 		t.Error(bsErr)
@@ -124,7 +124,7 @@ func TestBlocks_Tail(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		wg.Add(1)
 		go func(bs *store.Blocks, wg *sync.WaitGroup, i int) {
-			ch, _, tailErr := bs.Tail(context.TODO(), 0, 1*time.Second)
+			ch, _, _, tailErr := bs.Tail(context.TODO(), 0, 1*time.Second)
 			wg.Done()
 			if tailErr != nil {
 				fmt.Println("tail[", i, "]:", tailErr)
