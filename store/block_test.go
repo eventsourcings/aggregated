@@ -15,7 +15,7 @@ func TestOpenBlocks(t *testing.T) {
 	s := `G:\tmp\blocks\t1.bs`
 	bs, bsErr := store.OpenBlocks(store.BlocksOpenOptions{
 		Path:          s,
-		BlockSize:     64 * commons.BYTE,
+		BlockCapacity: 64 * commons.BYTE,
 		MaxCachedSize: 0,
 		Meta:          map[string]string{},
 	})
@@ -29,7 +29,7 @@ func TestBlocks_Write(t *testing.T) {
 	s := `G:\tmp\blocks\t1.bs`
 	bs, bsErr := store.OpenBlocks(store.BlocksOpenOptions{
 		Path:          s,
-		BlockSize:     64 * commons.BYTE,
+		BlockCapacity: 64 * commons.BYTE,
 		MaxCachedSize: 0,
 		Meta:          map[string]string{},
 	})
@@ -50,7 +50,7 @@ func TestBlocks_Write_Multi(t *testing.T) {
 	s := `G:\tmp\blocks\t2.bs`
 	bs, bsErr := store.OpenBlocks(store.BlocksOpenOptions{
 		Path:          s,
-		BlockSize:     64 * commons.BYTE,
+		BlockCapacity: 64 * commons.BYTE,
 		MaxCachedSize: 0,
 		Meta:          map[string]string{},
 	})
@@ -75,7 +75,7 @@ func TestBlocks_Read(t *testing.T) {
 	s := `G:\tmp\blocks\t1.bs`
 	bs, bsErr := store.OpenBlocks(store.BlocksOpenOptions{
 		Path:          s,
-		BlockSize:     64 * commons.BYTE,
+		BlockCapacity: 64 * commons.BYTE,
 		MaxCachedSize: 0,
 		Meta:          map[string]string{},
 	})
@@ -83,9 +83,9 @@ func TestBlocks_Read(t *testing.T) {
 		t.Error(bsErr)
 	}
 	e, has, readErr := bs.Read(1)
-	fmt.Println(string(e.Value), e.BeginBlockNo, e.EndBlockNo, has, readErr)
+	fmt.Println(e, has, readErr)
 	e, has, readErr = bs.Read(5)
-	fmt.Println(string(e.Value), e.BeginBlockNo, e.EndBlockNo, has, readErr)
+	fmt.Println(e, has, readErr)
 	e, has, readErr = bs.Read(7)
 	fmt.Println(has, readErr)
 }
@@ -94,7 +94,7 @@ func TestBlocks_List(t *testing.T) {
 	s := `G:\tmp\blocks\t1.bs`
 	bs, bsErr := store.OpenBlocks(store.BlocksOpenOptions{
 		Path:          s,
-		BlockSize:     64 * commons.BYTE,
+		BlockCapacity: 64 * commons.BYTE,
 		MaxCachedSize: 0,
 		Meta:          map[string]string{},
 	})
@@ -112,7 +112,7 @@ func TestBlocks_Tail(t *testing.T) {
 	s := `G:\tmp\blocks\t1.bs`
 	bs, bsErr := store.OpenBlocks(store.BlocksOpenOptions{
 		Path:          s,
-		BlockSize:     64 * commons.BYTE,
+		BlockCapacity: 64 * commons.BYTE,
 		MaxCachedSize: 0,
 		Meta:          map[string]string{},
 	})

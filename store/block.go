@@ -51,19 +51,19 @@ func (bn *BlockNo) Set(n uint64) {
 
 type BlockMeta map[string]string
 
-func (meta BlockMeta) setBlockSize(v uint64) {
-	meta["blockSize"] = fmt.Sprintf("%d", v)
+func (meta BlockMeta) setBlockCapacity(v uint64) {
+	meta["blockCapacity"] = fmt.Sprintf("%d", v)
 	return
 }
 
-func (meta BlockMeta) blockSize() (v uint64) {
-	blockSizeValue, hasBlockSize := meta["blockSize"]
-	if !hasBlockSize {
-		panic(fmt.Errorf("blocks: there is no blockSize in meta"))
+func (meta BlockMeta) blockCapacity() (v uint64) {
+	capacity, hasCapacity := meta["blockCapacity"]
+	if !hasCapacity {
+		panic(fmt.Errorf("blocks: there is no blockCapacity in meta"))
 		return
 	}
 	var err error
-	v, err = strconv.ParseUint(blockSizeValue, 10, 64)
+	v, err = strconv.ParseUint(capacity, 10, 64)
 	if err != nil {
 		panic(fmt.Errorf("blocks: blockSize in meta is not uint64"))
 		return
@@ -88,7 +88,7 @@ func (meta BlockMeta) id() (v string) {
 
 type BlocksOpenOptions struct {
 	Path          string
-	BlockSize     uint64
+	BlockCapacity uint64
 	MaxCachedSize uint64
 	Meta          map[string]string
 }
@@ -144,15 +144,15 @@ func OpenBlocks(options BlocksOpenOptions) (bs *Blocks, err error) {
 		return
 	}
 	bs = &Blocks{
-		meta:             BlockMeta{},
-		file:             file,
-		blockSize:        0,
-		blockContentSize: 0,
-		counter:          sync.WaitGroup{},
-		cache:            cache,
-		lastBlockNo:      nil,
-		lastWroteBlockNo: nil,
-		closed:           0,
+		meta:                 BlockMeta{},
+		file:                 file,
+		blockCapacity:        0,
+		blockContentCapacity: 0,
+		counter:              sync.WaitGroup{},
+		cache:                cache,
+		lastBlockNo:          nil,
+		lastWroteBlockNo:     nil,
+		closed:               0,
 	}
 	// meta
 	if fs.Size() > 0 {
@@ -168,29 +168,28 @@ func OpenBlocks(options BlocksOpenOptions) (bs *Blocks, err error) {
 			return
 		}
 		// blockSize
-		bs.blockSize = bs.meta.blockSize()
+		bs.blockCapacity = bs.meta.blockCapacity()
 		// blockContentSize
-		bs.blockContentSize = bs.blockSize - 16
+		bs.blockContentCapacity = bs.blockCapacity - 16
 		// last block no
-		fmt.Println(fs.Size(), fs.Size()-blocksMetaSize, uint64((fs.Size()-blocksMetaSize)/int64(bs.blockSize)))
 		bs.lastBlockNo = &BlockNo{
-			value:   uint64((fs.Size() - blocksMetaSize) / int64(bs.blockSize)),
+			value:   uint64((fs.Size() - blocksMetaSize) / int64(bs.blockCapacity)),
 			padding: [7]uint64{},
 		}
 		bs.lastWroteBlockNo = &BlockNo{
-			value:   uint64((fs.Size() - blocksMetaSize) / int64(bs.blockSize)),
+			value:   uint64((fs.Size() - blocksMetaSize) / int64(bs.blockCapacity)),
 			padding: [7]uint64{},
 		}
 	} else {
 		// blockSize
-		if options.BlockSize < 64*commons.BYTE {
-			err = fmt.Errorf("open blocks failed, block size cant be less than 64B, current is %v", bs.blockSize)
+		if options.BlockCapacity < 64*commons.BYTE {
+			err = fmt.Errorf("open blocks failed, block size cant be less than 64B, current is %v", bs.blockCapacity)
 			return
 		}
-		bs.blockSize = options.BlockSize
-		bs.meta.setBlockSize(bs.blockSize)
+		bs.blockCapacity = options.BlockCapacity
+		bs.meta.setBlockCapacity(bs.blockCapacity)
 		// blockContentSize
-		bs.blockContentSize = bs.blockSize - 16
+		bs.blockContentCapacity = bs.blockCapacity - 16
 		// last block no
 		bs.lastBlockNo = &BlockNo{
 			value:   0,
@@ -226,7 +225,7 @@ func OpenBlocks(options BlocksOpenOptions) (bs *Blocks, err error) {
 		}
 	}
 	// update cache
-	maxCachedBlockNum = int64(math.Ceil(float64(maxCachedSize) / float64(bs.blockSize)))
+	maxCachedBlockNum = int64(math.Ceil(float64(maxCachedSize) / float64(bs.blockCapacity)))
 	bs.cache.UpdateMaxCost(maxCachedBlockNum)
 	// prepare cache
 	if bs.lastWroteBlockNo.Value() > 0 {
@@ -245,15 +244,15 @@ func OpenBlocks(options BlocksOpenOptions) (bs *Blocks, err error) {
 }
 
 type Blocks struct {
-	meta             BlockMeta
-	file             *os.File
-	blockSize        uint64
-	blockContentSize uint64
-	counter          sync.WaitGroup
-	cache            *ristretto.Cache
-	lastBlockNo      *BlockNo
-	lastWroteBlockNo *BlockNo
-	closed           int64
+	meta                 BlockMeta
+	file                 *os.File
+	blockCapacity        uint64
+	blockContentCapacity uint64
+	counter              sync.WaitGroup
+	cache                *ristretto.Cache
+	lastBlockNo          *BlockNo
+	lastWroteBlockNo     *BlockNo
+	closed               int64
 }
 
 func (bs *Blocks) Id() (id string) {
@@ -276,12 +275,12 @@ func (bs *Blocks) Write(p []byte) (entryBeginBlockNo uint64, entryEndBlockNo uin
 		return
 	}
 	bs.counter.Add(1)
-	blockNumber := uint64(math.Ceil(float64(contentLen) / float64(bs.blockContentSize)))
+	blockNumber := uint64(math.Ceil(float64(contentLen) / float64(bs.blockContentCapacity)))
 	beg, end := bs.lastBlockNo.Next(blockNumber)
 	entryBeginBlockNo = beg
 	entryEndBlockNo = end
 	if blockNumber == 1 {
-		block := bs.encodeBlock(p, 0, 0)
+		block := NewBlock(bs.blockCapacity, 0, 0)
 		writeBlockErr := bs.writeBlock(block, entryBeginBlockNo)
 		if writeBlockErr != nil {
 			bs.counter.Done()
@@ -295,10 +294,10 @@ func (bs *Blocks) Write(p []byte) (entryBeginBlockNo uint64, entryEndBlockNo uin
 	}
 	blockNo := entryBeginBlockNo
 	for i := uint64(0); i < blockNumber; i++ {
-		begIdx := i * bs.blockContentSize
+		begIdx := i * bs.blockContentCapacity
 		endIdx := contentLen
 		if i != blockNumber-1 {
-			endIdx = begIdx + bs.blockContentSize
+			endIdx = begIdx + bs.blockContentCapacity
 		}
 		blockContent := p[begIdx:endIdx]
 		prev := uint64(0)
@@ -309,7 +308,8 @@ func (bs *Blocks) Write(p []byte) (entryBeginBlockNo uint64, entryEndBlockNo uin
 		if i < blockNumber-1 {
 			next = blockNo + 1
 		}
-		block := bs.encodeBlock(blockContent, prev, next)
+		block := NewBlock(bs.blockCapacity, prev, next)
+		block.Write(blockContent)
 		writeBlockErr := bs.writeBlock(block, blockNo)
 		if writeBlockErr != nil {
 			bs.counter.Done()
@@ -320,9 +320,9 @@ func (bs *Blocks) Write(p []byte) (entryBeginBlockNo uint64, entryEndBlockNo uin
 	}
 	bs.lastWroteBlockNo.Set(beg)
 	bs.cache.Set(entryBeginBlockNo, &Entry{
-		BeginBlockNo: beg,
-		EndBlockNo:   end,
-		Value:        p,
+		begBlockNo: beg,
+		endBlockNo: end,
+		value:      p,
 	}, int64(len(p)))
 	bs.counter.Done()
 	return
@@ -330,7 +330,7 @@ func (bs *Blocks) Write(p []byte) (entryBeginBlockNo uint64, entryEndBlockNo uin
 
 func (bs *Blocks) writeBlock(block []byte, blockNo uint64) (err error) {
 	blockLen := len(block)
-	fileOffset := int64((blockNo-1)*bs.blockSize) + blocksMetaSize
+	fileOffset := int64((blockNo-1)*bs.blockCapacity) + blocksMetaSize
 	for {
 		n, writeErr := bs.file.WriteAt(block, fileOffset)
 		if writeErr != nil {
@@ -368,7 +368,7 @@ func (bs *Blocks) Entries(offset uint64, length uint64) (entries EntryList, err 
 			return
 		}
 		entries.Append(entry)
-		offset = entry.EndBlockNo + 1
+		offset = entry.endBlockNo + 1
 		if offset > bs.lastBlockNo.Value() {
 			break
 		}
@@ -403,10 +403,10 @@ func (bs *Blocks) Tail(ctx context.Context, offset uint64, interval time.Duratio
 				if readLastErr != nil || !hasLast {
 					break
 				}
-				if startBlockNo > lastEntry.BeginBlockNo {
+				if startBlockNo > lastEntry.begBlockNo {
 					break
 				}
-				length := lastEntry.BeginBlockNo - startBlockNo + 1
+				length := lastEntry.begBlockNo - startBlockNo + 1
 				list, listErr := bs.Entries(startBlockNo, length)
 				if listErr != nil {
 					break
@@ -415,7 +415,7 @@ func (bs *Blocks) Tail(ctx context.Context, offset uint64, interval time.Duratio
 					break
 				}
 				entriesCh <- list
-				startBlockNo = lastEntry.EndBlockNo + 1
+				startBlockNo = lastEntry.endBlockNo + 1
 			}
 			if stopped {
 				break
@@ -453,7 +453,7 @@ func (bs *Blocks) read(blockNo uint64) (entry *Entry, has bool, err error) {
 	if !hasBlock {
 		return
 	}
-	content, prev, next := bs.decodeBlock(block)
+	prev, next, content := block.Read()
 	if prev > 0 {
 		entry, has, err = bs.read(prev)
 		return
@@ -475,22 +475,22 @@ func (bs *Blocks) read(blockNo uint64) (entry *Entry, has bool, err error) {
 			err = fmt.Errorf("blocks: read %d of %d block failed, not exist", next, blockNo)
 			return
 		}
-		content, _, next = bs.decodeBlock(nextBlock)
+		_, next, content = nextBlock.Read()
 		_, _ = buf.Write(content)
 		endBlock++
 	}
 	entry = &Entry{
-		BeginBlockNo: blockNo,
-		EndBlockNo:   endBlock,
-		Value:        buf.Bytes(),
+		begBlockNo: blockNo,
+		endBlockNo: endBlock,
+		value:      buf.Bytes(),
 	}
 	has = true
 	return
 }
 
-func (bs *Blocks) readBlock(blockNo uint64) (block []byte, has bool, err error) {
-	fileOffset := int64((blockNo-1)*bs.blockSize) + blocksMetaSize
-	stored := make([]byte, bs.blockSize)
+func (bs *Blocks) readBlock(blockNo uint64) (block Block, has bool, err error) {
+	fileOffset := int64((blockNo-1)*bs.blockCapacity) + blocksMetaSize
+	stored := make([]byte, bs.blockCapacity)
 	n, readErr := bs.file.ReadAt(stored, fileOffset)
 	if readErr != nil {
 		if readErr == io.EOF {
@@ -522,49 +522,58 @@ func (bs *Blocks) Close() {
 	return
 }
 
-func (bs *Blocks) encodeBlock(p []byte, prev uint64, next uint64) (b []byte) {
-	b = make([]byte, bs.blockSize)
-	binary.LittleEndian.PutUint64(b[0:8], prev)
-	binary.LittleEndian.PutUint64(b[8:16], next)
+func NewBlock(capacity uint64, prevNo uint64, nextNo uint64) (b Block) {
+	b = make([]byte, capacity)
+	binary.LittleEndian.PutUint64(b[0:8], prevNo)
+	binary.LittleEndian.PutUint64(b[8:16], nextNo)
+	return
+}
+
+type Block []byte
+
+func (b Block) Write(p []byte) {
 	copy(b[16:], p)
 	return
 }
 
-func (bs *Blocks) decodeBlock(b []byte) (p []byte, prev uint64, next uint64) {
+func (b Block) Read() (prev uint64, next uint64, p []byte) {
 	prev = binary.LittleEndian.Uint64(b[0:8])
 	next = binary.LittleEndian.Uint64(b[8:16])
 	p = b[16:]
 	return
 }
 
-func (bs *Blocks) getBlockStickyNo(block []byte) (prev uint64, next uint64) {
-	prev = binary.LittleEndian.Uint64(block[0:8])
-	next = binary.LittleEndian.Uint64(block[8:16])
-	return
-}
-
-func (bs *Blocks) updateBlockStickyNo(block []byte, prev uint64, next uint64) {
-	binary.LittleEndian.PutUint64(block[0:8], prev)
-	binary.LittleEndian.PutUint64(block[8:16], next)
-	return
-}
-
 type Entry struct {
-	BeginBlockNo uint64
-	EndBlockNo   uint64
-	Value        []byte
+	begBlockNo uint64
+	endBlockNo uint64
+	value      []byte
+}
+
+func (e *Entry) BlockNo() (beg uint64, end uint64) {
+	beg, end = e.begBlockNo, e.endBlockNo
+	return
+}
+
+func (e *Entry) Value() (p []byte) {
+	p = e.value
+	return
+}
+
+func (e *Entry) String() (p string) {
+	p = fmt.Sprintf("{[%d:%d] [%s]}", e.begBlockNo, e.endBlockNo, string(e.value))
+	return
 }
 
 type EntryList []*Entry
 
 func (p EntryList) Len() int           { return len(p) }
-func (p EntryList) Less(i, j int) bool { return p[i].BeginBlockNo < p[j].BeginBlockNo }
+func (p EntryList) Less(i, j int) bool { return p[i].begBlockNo < p[j].begBlockNo }
 func (p EntryList) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 
 func (p *EntryList) Append(e *Entry) {
 	pos := sort.Search(len(*p), func(i int) bool {
 		pp := *p
-		return pp[i].BeginBlockNo >= e.BeginBlockNo
+		return pp[i].begBlockNo >= e.begBlockNo
 	})
 	if pos >= len(*p) {
 		*p = append(*p, e)
@@ -584,7 +593,7 @@ func (p EntryList) Last() (entry *Entry) {
 func (p EntryList) String() string {
 	nos := make([]string, 0, 1)
 	for _, entry := range p {
-		nos = append(nos, fmt.Sprintf("{%d:%d}", entry.BeginBlockNo, entry.EndBlockNo))
+		nos = append(nos, fmt.Sprintf("{%d:%d}", entry.begBlockNo, entry.endBlockNo))
 	}
 	return "[" + strings.Join(nos, ",") + "]"
 }
